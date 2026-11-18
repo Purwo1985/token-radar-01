@@ -1,4 +1,4 @@
-// The token radar's model (radar-2): one snapshot of the protocol universe in, one ranked board out.
+// The token radar's model (radar-3): one snapshot of the protocol universe in, one ranked board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and adds every
 // other pre-token protocol the snapshot can rank: the early rows the radar exists to find. A protocol
@@ -8,20 +8,24 @@
 // ranking for the same reason the watchlist leaves them out: they are not protocols waiting on a
 // launch of their own.
 //
-// Implied value follows only from the snapshot's own figures, in four factors:
+// Implied value follows only from the snapshot's own figures, in five factors:
 //
-//   category multiple = the median market-cap / TVL of the live-token protocols in the same
-//                         category, computed from this snapshot at run time (at least 3 live
-//                         comparables, otherwise the snapshot-wide median). No multiple is typed
-//                         in; the market in the snapshot sets it. Clamped to [0.05, 1.50].
+//   category multiple = a comps curve where the snapshot carries enough live comparables: the
+//                         log-linear fit of market-cap / TVL on TVL among the live-token
+//                         protocols of the same category (at least 6), so the multiple is the one
+//                         the market pays at this protocol's own size. With 3 to 5 comparables the
+//                         category median is shrunk toward the snapshot-wide median; with fewer,
+//                         the snapshot-wide median. Clamped to [0.05, 1.50]. No multiple is typed
+//                         in; the market in the snapshot sets it.
 //   growth multiplier = 1 + 0.6 x clamp(change_7d, -60, +150) / 100
 //   maturity          = 0.65 + 0.35 x min(age_days, 1460) / 1460   (age unknown: 365 days)
-//   implied           = round(tvl_usd x category multiple x growth multiplier x maturity)
+//   chain breadth     = 1 + 0.02 x min(chains - 1, 5)              (at most 1.10)
+//   implied           = round(tvl_usd x category multiple x growth multiplier x maturity x chain breadth)
 //
 // Age is the time since DefiLlama first listed the protocol: the best record of how long it has run
-// with no token. A protocol that has grown fast, run long with no token, and sits in a category the
-// market already pays a high multiple for scores highest. No protocol name is ever special-cased:
-// the same function scores every row.
+// with no token. A protocol that has grown fast, run long with no token, sits in a category the
+// market already pays a high multiple for, and is live on many chains scores highest. No protocol
+// name is ever special-cased: the same function scores every row.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -58,6 +62,13 @@ export interface ModelConstants {
   multiple_floor: number;
   multiple_cap: number;
   min_category_sample: number;
+  /** Shrinkage prior weight: a category median is n / (n + shrink_k) its own median. */
+  shrink_k: number;
+  /** Live comparables needed in a category before the comps curve is fitted. */
+  min_curve_sample: number;
+  /** Chain-breadth step: each extra chain past the first adds this much, up to chain_cap_extra. */
+  chain_step: number;
+  chain_cap_extra: number;
 }
 
 export const MODEL: ModelConstants = {
@@ -71,10 +82,14 @@ export const MODEL: ModelConstants = {
   multiple_floor: 0.05,
   multiple_cap: 1.5,
   min_category_sample: 3,
+  shrink_k: 3,
+  min_curve_sample: 6,
+  chain_step: 0.02,
+  chain_cap_extra: 0.1,
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 32;
@@ -108,6 +123,8 @@ export interface BoardRow {
     growth_pct: number;
     growth_multiplier: number;
     maturity_multiplier: number;
+    chain_multiplier: number;
+    multiple_kind: 'curve' | 'median' | 'global';
     age_days: number | null;
   };
   farm_steps: string[];
@@ -129,6 +146,8 @@ export interface RadarRow {
   category_multiple: number;
   growth_multiplier: number;
   maturity_multiplier: number;
+  chain_multiplier: number;
+  multiple_kind: 'curve' | 'median' | 'global';
   watchlist: boolean;
 }
 
@@ -144,6 +163,31 @@ export interface LiveRow {
   mcap_tvl: number | null;
 }
 
+/** One live comparable for a category: the market's own numbers, not a model. */
+export interface CompRow {
+  slug: string;
+  name: string;
+  tvl_usd: number;
+  mcap_usd: number;
+  mcap_tvl: number;
+}
+
+/** How one category's multiple was set, for the dashboard's multiples table. */
+export interface MultipleMeta {
+  kind: 'curve' | 'median' | 'global';
+  /** Live comparables in the category. */
+  n: number;
+  /** The multiple at the $100M TVL reference size, so curve and median rows compare. */
+  at_100m: number;
+}
+
+/** A category's comps curve: log10(mcap/TVL) = intercept + slope x log10(TVL). */
+export interface CompsCurve {
+  intercept: number;
+  slope: number;
+  n: number;
+}
+
 /** Everything the dashboard needs: the board, the live set, and the model it runs. */
 export interface RadarData {
   as_of: string;
@@ -152,6 +196,9 @@ export interface RadarData {
   model: ModelConstants;
   model_version: string;
   multiples: Record<string, number>;
+  curves: Record<string, CompsCurve>;
+  multiple_meta: Record<string, MultipleMeta>;
+  comps: Record<string, CompRow[]>;
   global_multiple: number;
   watchlist_size: number;
   board_size: number;
@@ -218,14 +265,23 @@ export function isRankable(p: SnapshotProtocol): boolean {
 }
 
 /**
- * The category multiples, computed from this snapshot's own live-token protocols: for each category
- * with at least `min_category_sample` live protocols carrying both a market cap and a TVL, the median
- * of their market-cap / TVL ratios, clamped to [multiple_floor, multiple_cap]. Categories without
- * enough live comparables fall back to the snapshot-wide median. Nothing here is typed in: the
- * snapshot's own market sets every multiple.
+ * The category multiples, computed from this snapshot's own live-token protocols. For each category
+ * the snapshot carries live comparables for, in order of evidence:
+ *
+ *   6 or more live comparables: a comps curve, the ordinary-least-squares log-linear fit of
+ *     log10(market-cap / TVL) on log10(TVL), so the multiple is the one the market pays at the
+ *     protocol's own size. The fitted value is clamped to [multiple_floor, multiple_cap].
+ *   3 to 5 live comparables: the category median, shrunk toward the snapshot-wide median with
+ *     weight n / (n + shrink_k), so a thin category does not speak louder than its evidence.
+ *   fewer: the snapshot-wide median of every live market-cap / TVL ratio.
+ *
+ * Nothing here is typed in: the snapshot's own market sets every multiple, curve and fallback.
  */
-export function categoryMultiples(snapshot: Snapshot, model: ModelConstants): { multiples: Record<string, number>; global: number } {
-  const byCategory = new Map<string, number[]>();
+export function categoryMultiples(
+  snapshot: Snapshot,
+  model: ModelConstants,
+): { multiples: Record<string, number>; global: number; curves: Record<string, CompsCurve>; meta: Record<string, MultipleMeta> } {
+  const byCategory = new Map<string, { tvl: number; ratio: number }[]>();
   const all: number[] = [];
   for (const p of snapshot.protocols) {
     if (isPreToken(p)) continue;
@@ -235,42 +291,104 @@ export function categoryMultiples(snapshot: Snapshot, model: ModelConstants): { 
     if (!Number.isFinite(ratio) || ratio <= 0) continue;
     all.push(ratio);
     const list = byCategory.get(p.category ?? 'Other') ?? [];
-    list.push(ratio);
+    list.push({ tvl: p.tvl_usd, ratio });
     byCategory.set(p.category ?? 'Other', list);
   }
   const clamp = (n: number): number => Math.min(model.multiple_cap, Math.max(model.multiple_floor, n));
   const global = all.length > 0 ? clamp(median(all)) : 0.25;
   const multiples: Record<string, number> = {};
-  for (const [category, ratios] of [...byCategory.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
-    if (ratios.length >= model.min_category_sample) multiples[category] = clamp(median(ratios));
+  const curves: Record<string, CompsCurve> = {};
+  const meta: Record<string, MultipleMeta> = {};
+  const at100m = (curve: CompsCurve): number => clamp(Math.pow(10, curve.intercept + curve.slope * 8));
+  for (const [category, points] of [...byCategory.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))) {
+    const ratios = points.map((pt) => pt.ratio);
+    const catMedian = clamp(median(ratios));
+    if (points.length >= model.min_curve_sample) {
+      const xs = points.map((pt) => Math.log10(pt.tvl));
+      const ys = points.map((pt) => Math.log10(pt.ratio));
+      const mx = xs.reduce((a, b) => a + b, 0) / xs.length;
+      const my = ys.reduce((a, b) => a + b, 0) / ys.length;
+      let sxx = 0;
+      let sxy = 0;
+      for (let i = 0; i < xs.length; i++) {
+        sxx += (xs[i]! - mx) * (xs[i]! - mx);
+        sxy += (xs[i]! - mx) * (ys[i]! - my);
+      }
+      if (sxx > 0) {
+        const slope = sxy / sxx;
+        const curve: CompsCurve = { intercept: my - slope * mx, slope, n: points.length };
+        curves[category] = curve;
+        multiples[category] = catMedian;
+        meta[category] = { kind: 'curve', n: points.length, at_100m: at100m(curve) };
+        continue;
+      }
+    }
+    if (points.length >= model.min_category_sample) {
+      const w = points.length / (points.length + model.shrink_k);
+      multiples[category] = clamp(w * catMedian + (1 - w) * global);
+      meta[category] = { kind: 'median', n: points.length, at_100m: multiples[category]! };
+    } else {
+      meta[category] = { kind: 'global', n: points.length, at_100m: global };
+    }
   }
-  return { multiples, global };
+  return { multiples, global, curves, meta };
 }
 
-/** The multiple one category gets: its own median when the snapshot carries enough live comparables,
- *  else the snapshot-wide median. */
-export function multipleFor(category: string | null, multiples: Record<string, number>, global: number): number {
-  if (category !== null && Object.prototype.hasOwnProperty.call(multiples, category)) return multiples[category]!;
-  return global;
+/** The multiple one category gets at one protocol's size: its comps curve when the snapshot fitted
+ *  one, else the shrunk category median, else the snapshot-wide median. */
+export function multipleFor(
+  category: string | null,
+  tvlUsd: number,
+  multiples: Record<string, number>,
+  curves: Record<string, CompsCurve>,
+  global: number,
+  model: ModelConstants,
+): { multiple: number; kind: 'curve' | 'median' | 'global' } {
+  if (category !== null && Object.prototype.hasOwnProperty.call(curves, category)) {
+    const curve = curves[category]!;
+    const fitted = Math.pow(10, curve.intercept + curve.slope * Math.log10(Math.max(1, tvlUsd)));
+    return { multiple: Math.min(model.multiple_cap, Math.max(model.multiple_floor, fitted)), kind: 'curve' };
+  }
+  if (category !== null && Object.prototype.hasOwnProperty.call(multiples, category)) {
+    return { multiple: multiples[category]!, kind: 'median' };
+  }
+  return { multiple: global, kind: 'global' };
 }
 
-/** The four factors and the implied value one protocol gets under `model`. */
+/** The chain-breadth factor: each chain past the first adds chain_step, up to chain_cap_extra. */
+export function chainMultiplier(chains: number, model: ModelConstants): number {
+  const extra = Math.min(Math.max(chains - 1, 0), 5) * model.chain_step;
+  return 1 + Math.min(extra, model.chain_cap_extra);
+}
+
+/** The five factors and the implied value one protocol gets under `model`. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
   model: ModelConstants,
   multiples: Record<string, number>,
+  curves: Record<string, CompsCurve>,
   globalMultiple: number,
-): { implied: number; categoryMultiple: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null } {
+): {
+  implied: number;
+  categoryMultiple: number;
+  multipleKind: 'curve' | 'median' | 'global';
+  growthPct: number;
+  growthMult: number;
+  maturityMult: number;
+  chainMult: number;
+  age: number | null;
+} {
   const age = ageDays(asOf, protocol.listed_at);
-  const categoryMultiple = multipleFor(protocol.category, multiples, globalMultiple);
+  const { multiple: categoryMultiple, kind: multipleKind } = multipleFor(protocol.category, protocol.tvl_usd, multiples, curves, globalMultiple, model);
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
   const ageForModel = age ?? model.unknown_age_days;
   const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const implied = Math.max(1, Math.round(protocol.tvl_usd * categoryMultiple * growthMult * maturityMult));
-  return { implied, categoryMultiple, growthPct, growthMult, maturityMult, age };
+  const chainMult = chainMultiplier(protocol.chains.length, model);
+  const implied = Math.max(1, Math.round(protocol.tvl_usd * categoryMultiple * growthMult * maturityMult * chainMult));
+  return { implied, categoryMultiple, multipleKind, growthPct, growthMult, maturityMult, chainMult, age };
 }
 
 /** The snapshot's protocol by slug. */
@@ -282,7 +400,7 @@ const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
 
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
-  const { multiples, global } = categoryMultiples(snapshot, model);
+  const { multiples, curves, global } = categoryMultiples(snapshot, model);
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor: every slug it names, even one the snapshot no longer carries (it
@@ -299,11 +417,12 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   for (const p of early) chosen.set(p.slug, p);
 
   const scored = [...chosen.values()].map((p) => {
-    const v = impliedValue(p, snapshot.as_of, model, multiples, global);
+    const v = impliedValue(p, snapshot.as_of, model, multiples, curves, global);
     return { p, ...v };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   const watchlist = new Set(snapshot.watchlist);
+  const total = scored.length;
   return scored.map((s, i) => ({
     rank: i + 1,
     slug: s.p.slug,
@@ -325,9 +444,11 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
       growth_pct: round4(s.growthPct),
       growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
+      chain_multiplier: round4(s.chainMult),
+      multiple_kind: s.multipleKind,
       age_days: s.age,
     },
-    farm_steps: farmSteps(s.p, s.age).map(stepText),
+    farm_steps: farmSteps(s.p, s.age, i + 1, total).map(stepText),
   }));
 }
 
@@ -409,20 +530,38 @@ function secondActionFor(p: SnapshotProtocol, capital: number, chain: string): s
   return `Use a second feature of ${name} on ${chain}, such as a swap or a vote, with $10.`;
 }
 
+/** A compact dollar figure for a farm step: $2.75B, $376.0M, $51.1M, $900K. */
+export function compactUsd(n: number): string {
+  if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
+  if (n >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `$${Math.round(n / 1e3)}K`;
+  return `$${Math.round(n)}`;
+}
+
 /**
- * A protocol's farm plan: seven steps, each an action with a cost and a time. The plan is derived
- * from the protocol's own record (category, chains, TVL and age), never from a hand-written list
- * of names. Gas follows the chain's fee level; capital follows TVL; the hold follows age.
+ * A protocol's farm plan: nine steps, each an action with a cost and a time. The plan is derived
+ * from the protocol's own record (category, chains, TVL, age, growth and rank), never from a
+ * hand-written list of names. Gas follows the chain's fee level; capital follows TVL; the hold
+ * follows age; the second step states the protocol's own numbers, so the plan is visibly about
+ * this protocol and no other.
  */
-export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
+export function farmSteps(p: SnapshotProtocol, age: number | null, rank: number, total: number): FarmStep[] {
   const chain = chainOf(p);
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
   const gas = gasFor(chain);
+  const growth = p.change_7d === null ? 'an unreported 7-day change' : `${p.change_7d > 0 ? '+' : ''}${p.change_7d.toFixed(2)}% over 7 days`;
+  const ageText = age === null ? 'an unreported listing date' : `${age} days listed`;
+  const chainText = p.chains.length === 0 ? 'an unnamed chain' : p.chains.length === 1 ? chain : `${p.chains.length} chains, starting with ${chain}`;
   return [
     {
       text: `Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.`,
       cost: `no cost to create, about ${gas} for the first transaction`,
+      time: '5 minutes',
+    },
+    {
+      text: `Start from the numbers: ${p.name} holds ${compactUsd(p.tvl_usd)} of TVL on ${chainText}, with ${growth} and ${ageText} with no token on record, so the radar ranks it #${rank} of ${total}.`,
+      cost: 'nothing to read, and the snapshot is the source',
       time: '5 minutes',
     },
     {
@@ -433,6 +572,11 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
     {
       text: secondActionFor(p, capital, chain),
       cost: `about ${gas}`,
+      time: '10 minutes',
+    },
+    {
+      text: `Open ${p.name}'s own docs and points page first and confirm a points or rewards program exists before you deposit any more.`,
+      cost: 'nothing to check, and no program means no farm',
       time: '10 minutes',
     },
     {
@@ -493,14 +637,37 @@ export function radarRow(row: BoardRow): RadarRow {
     category_multiple: row.model.category_multiple,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
+    chain_multiplier: row.model.chain_multiplier,
+    multiple_kind: row.model.multiple_kind,
     watchlist: row.watchlist,
   };
+}
+
+/** The live comparables of each category the board ranks, top 5 by market cap: the evidence the
+ *  multiples table and the detail view show, from the snapshot's own live-token protocols. */
+export function liveComps(snapshot: Snapshot): Record<string, CompRow[]> {
+  const byCategory = new Map<string, CompRow[]>();
+  for (const p of snapshot.protocols) {
+    if (isPreToken(p)) continue;
+    if (p.category !== null && PRODUCT_CATEGORIES.has(p.category)) continue;
+    if (p.mcap_usd === null || p.tvl_usd <= 0) continue;
+    const ratio = p.mcap_usd / p.tvl_usd;
+    if (!Number.isFinite(ratio) || ratio <= 0) continue;
+    const list = byCategory.get(p.category ?? 'Other') ?? [];
+    list.push({ slug: p.slug, name: p.name, tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd, mcap_tvl: Math.round(ratio * 1000) / 1000 });
+    byCategory.set(p.category ?? 'Other', list);
+  }
+  const out: Record<string, CompRow[]> = {};
+  for (const [category, rows] of [...byCategory.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))) {
+    out[category] = rows.sort((a, b) => b.mcap_usd - a.mcap_usd).slice(0, 5);
+  }
+  return out;
 }
 
 /** Everything the dashboard renders, from the snapshot. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
   const board = buildBoard(snapshot, model);
-  const { multiples, global } = categoryMultiples(snapshot, model);
+  const { multiples, curves, meta, global } = categoryMultiples(snapshot, model);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !r.watchlist).length;
   const radar: RadarData = {
@@ -510,6 +677,9 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     model,
     model_version: MODEL_VERSION,
     multiples,
+    curves,
+    multiple_meta: meta,
+    comps: liveComps(snapshot),
     global_multiple: global,
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,

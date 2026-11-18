@@ -128,28 +128,28 @@ td.num, th.num { text-align: right; }
 .sandbox-note { font-size: 13px; color: var(--amber); }
 
 /* detail dialog */
-dialog.detail { background: var(--panel); color: var(--text); border: 1px solid var(--line2); border-radius: 14px; padding: 0; width: min(680px, 94vw); max-height: 88vh; overflow-y: auto; box-shadow: 0 24px 70px rgba(0, 0, 0, .6); }
+dialog.detail { background: var(--panel); color: var(--text); border: 1px solid var(--line2); border-radius: 14px; padding: 0; width: min(880px, 94vw); max-height: 94vh; overflow-y: auto; box-shadow: 0 24px 70px rgba(0, 0, 0, .6); }
 dialog.detail::backdrop { background: rgba(4, 8, 18, .72); }
-.detail-head { display: flex; justify-content: space-between; gap: 16px; padding: 20px 22px 0; }
+.detail-head { display: flex; justify-content: space-between; gap: 16px; padding: 16px 22px 0; }
 .detail-head .brand-name { color: var(--accent); font-weight: 700; font-size: 13px; }
 .detail-head h2 { margin: 4px 0 4px; font-size: 25px; line-height: 1.2; }
 .close { background: var(--panel2); color: var(--text); border: 1px solid var(--line2); border-radius: 8px; padding: 7px 13px; height: fit-content; font-weight: 600; }
-.detail-section { padding: 16px 22px 22px; border-top: 1px solid var(--line); margin-top: 16px; }
+.detail-section { padding: 14px 22px 16px; border-top: 1px solid var(--line); margin-top: 14px; }
 .detail-section:first-of-type { margin-top: 0; }
-.detail-section h3 { margin: 0 0 12px; font-size: 16px; }
-.equation { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 20px; }
-.equation > div { display: flex; justify-content: space-between; gap: 12px; background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; }
+.detail-section h3 { margin: 0 0 10px; font-size: 16px; }
+.equation { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 20px; }
+.equation > div { display: flex; justify-content: space-between; gap: 12px; background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; }
 .equation span { color: var(--muted); font-size: 13px; }
 .equation b { font-size: 14.5px; }
 .equation .total { grid-column: 1 / -1; background: #123b34; border-color: var(--accent-dim); }
 .equation .total b { color: var(--accent); font-size: 17px; }
-.why { margin-top: 12px; }
-ol.steps { margin: 0; padding-left: 22px; display: grid; gap: 11px; }
+.why { margin-top: 10px; }
+ol.steps { margin: 0; padding-left: 22px; display: grid; gap: 8px; }
 ol.steps li { padding-left: 4px; }
 ol.steps li b { display: block; font-weight: 600; }
 ol.steps .cost { color: var(--muted); font-size: 13.5px; }
-.farm-total { margin-top: 14px; background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; padding: 11px 14px; font-size: 14px; }
-.risk { margin-top: 14px; border-left: 3px solid var(--amber); padding: 2px 0 2px 12px; color: var(--muted); font-size: 13.5px; }
+.farm-total { margin-top: 12px; background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; font-size: 14px; }
+.risk { margin-top: 12px; border-left: 3px solid var(--amber); padding: 2px 0 2px 12px; color: var(--muted); font-size: 13.5px; }
 
 /* footer */
 .foot { margin-top: 22px; color: var(--faint); font-size: 13px; }
