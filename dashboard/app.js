@@ -318,7 +318,7 @@
   }
 
   function sortHeader(key, label) {
-    return el('th', { scope: 'col', class: key === 'tvl' || key === 'growth' || key === 'age' || key === 'implied' ? 'num' : null },
+    return el('th', { scope: 'col', class: key === 'tvl' || key === 'growth' || key === 'age' || key === 'implied' ? 'num' : null, 'aria-sort': state.sort === key ? (state.dir < 0 ? 'descending' : 'ascending') : null },
       el('button', { type: 'button', class: 'sortbtn', onclick: function () { if (state.sort === key) state.dir = -state.dir; else { state.sort = key; state.dir = key === 'name' ? 1 : -1; } render(); } },
         label,
         state.sort === key ? el('span', { 'aria-hidden': 'true', text: state.dir < 0 ? ' v' : ' ^' }) : null
@@ -343,8 +343,8 @@
     var max = 1;
     list.forEach(function (r) { max = Math.max(max, active ? shownImplied(r) : r.implied_value_usd); });
     var tbody = el('tbody');
-    pageRows.forEach(function (r) {
-      var shownRank = active ? list.indexOf(r) + 1 : r.rank;
+    pageRows.forEach(function (r, i) {
+      var shownRank = active ? start + i + 1 : r.rank;
       var shownValue = active ? shownImplied(r) : r.implied_value_usd;
       var growth = r.change_7d === null ? 'n/a' : fmtPct(r.change_7d);
       var growthClass = r.change_7d === null ? '' : r.change_7d >= 0 ? 'pos' : 'neg';
